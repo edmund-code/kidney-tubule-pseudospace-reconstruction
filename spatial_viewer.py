@@ -523,7 +523,7 @@ def _make_gene_trace(layer: dict, marker_size: float = None) -> go.Scattergl:
             cmax=1,
             size=size,
             sizemode="diameter",   # explicit: size is in screen pixels, constant regardless of zoom
-            opacity=layer["opacity"],
+            opacity=1.0,
             showscale=False,
         ),
         visible=layer.get("visible", True),
@@ -690,18 +690,6 @@ def _make_layer_card(layer: dict, idx: int) -> html.Div:
                 ),
             ], style={"marginBottom": "4px"}),
 
-            # Opacity
-            html.Div([
-                html.Small(f"Opacity: {int(layer['opacity'] * 100)} %",
-                           id={"type": "opacity-label", "index": lid},
-                           style={"color": "#888"}),
-                dcc.Slider(
-                    id={"type": "opacity-slider", "index": lid},
-                    min=0.05, max=1.0, step=0.05, value=layer["opacity"],
-                    marks=None,
-                    tooltip={"placement": "bottom", "always_visible": False},
-                ),
-            ]),
         ],
     )
 
@@ -741,11 +729,9 @@ def serve_he_image():
     Input({"type": "eye-toggle",    "index": ALL}, "n_clicks"),
     Input({"type": "trash-btn",     "index": ALL}, "n_clicks"),
     Input({"type": "radius-slider", "index": ALL}, "value"),
-    Input({"type": "opacity-slider","index": ALL}, "value"),
     Input({"type": "color-dropdown","index": ALL}, "value"),
     # States needed to read current IDs and values
     State({"type": "radius-slider", "index": ALL}, "id"),
-    State({"type": "opacity-slider","index": ALL}, "id"),
     State({"type": "color-dropdown","index": ALL}, "id"),
     State("gene-search-dropdown", "value"),
     State("gene-layers", "data"),
@@ -754,8 +740,8 @@ def serve_he_image():
 def update_gene_layers(
     add_clicks,
     eye_clicks, trash_clicks,
-    radii, opacities, color_idxs,
-    radius_ids, opacity_ids, color_ids,
+    radii, color_idxs,
+    radius_ids, color_ids,
     gene, layers,
 ):
     ctx = callback_context
@@ -779,8 +765,7 @@ def update_gene_layers(
             "visible":    True,
             "colorscale": _COLORSCALES[cs_idx],
             "color_idx":  cs_idx,
-            "radius":     5,
-            "opacity":    0.85,
+            "radius":     2,
             "trace_idx":  len(layers),   # position this trace will occupy in figure.data
         }
         return layers + [new_layer], {"type": "add"}
@@ -797,8 +782,7 @@ def update_gene_layers(
         pass
 
     # Build lookup maps from layer_id → slider/dropdown current value
-    radius_map  = {r["index"]: v for r, v in zip(radius_ids,  radii)     if v is not None}
-    opacity_map = {o["index"]: v for o, v in zip(opacity_ids, opacities) if v is not None}
+    radius_map  = {r["index"]: v for r, v in zip(radius_ids, radii)      if v is not None}
     color_map   = {c["index"]: int(v) for c, v in zip(color_ids, color_idxs) if v is not None}
 
     new_layers = []
@@ -827,12 +811,6 @@ def update_gene_layers(
         elif lid in radius_map:
             updated["radius"] = radius_map[lid]
 
-        if lid in opacity_map and opacity_map[lid] != lay["opacity"]:
-            updated["opacity"] = opacity_map[lid]
-            action = {"type": "style", "lid": lid, "field": "opacity",
-                      "value": opacity_map[lid], "trace_idx": lay.get("trace_idx", 0)}
-        elif lid in opacity_map:
-            updated["opacity"] = opacity_map[lid]
 
         if lid in color_map:
             ci = color_map[lid]
@@ -898,8 +876,6 @@ def update_main_figure(layers, he_clicks, action):
         p = Patch()
         if field == "radius":
             p["data"][idx]["marker"]["size"] = val
-        elif field == "opacity":
-            p["data"][idx]["marker"]["opacity"] = val
         elif field == "colorscale":
             p["data"][idx]["marker"]["colorscale"] = val
         elif field == "visible":
