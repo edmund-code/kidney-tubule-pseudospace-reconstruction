@@ -69,7 +69,7 @@ import plotly.graph_objects as go
 # SECTION 2: Module-level globals (populated by main() before app.run)
 # ──────────────────────────────────────────────────────────────────────────────
 IMAGE: Image.Image = None          # image delivered to browser (may be downsampled)
-IMAGE_URL: str = None              # URL for main figure — served as static file to avoid base64 size limits
+IMAGE_URL: str = None              # absolute URL for main figure (http://localhost:PORT/he_image)
 LOWRES_IMAGE: Image.Image = None   # low-res image for minimap
 IMG_WIDTH: int = 0                 # pixel width of IMAGE (browser copy)
 IMG_HEIGHT: int = 0                # pixel height of IMAGE (browser copy)
@@ -682,7 +682,17 @@ app = dash.Dash(
     title="Spatial Viewer",
     update_title=None,
 )
-server = app.server   # expose Flask server for production deployment if needed
+server = app.server
+
+
+# Flask route that streams the H&E JPEG from disk.
+# Plotly's layout image `source` must be an http(s):// URL or data URI —
+# relative paths are silently ignored. This route gives it a real URL.
+@server.route("/he_image")
+def serve_he_image():
+    from flask import send_file
+    he_path = Path(__file__).parent / "assets" / "he_image.jpg"
+    return send_file(str(he_path), mimetype="image/jpeg")
 
 
 # ── Callback 1: All gene-layer store mutations ─────────────────────────────
@@ -1057,7 +1067,8 @@ def main():
     he_path = assets_dir / "he_image.jpg"
     print(f"[viewer] Saving H&E image to {he_path} ...")
     IMAGE.convert("RGB").save(he_path, format="JPEG", quality=90)
-    IMAGE_URL = "/assets/he_image.jpg"
+    # Plotly layout image source must be an http(s):// URL — relative paths are ignored.
+    IMAGE_URL = f"http://localhost:{args.port}/he_image"
     print(f"[viewer] H&E image saved ({he_path.stat().st_size / 1e6:.1f} MB)")
 
     print(f"[viewer] {len(COORDS_DF):,} spots  |  {len(GENE_NAMES):,} genes")
