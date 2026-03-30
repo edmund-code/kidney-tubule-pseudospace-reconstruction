@@ -37,7 +37,7 @@ Usage
     python spatial_viewer.py --data visium_data/Ctrl1A2 --port 8888
     python spatial_viewer.py --data visium_data/Ctrl1A2 --lab-images lab_tiff_images/
     python spatial_viewer.py --data myfile.h5ad --image path/to/image.png
-    python spatial_viewer.py --data myfile.h5ad --max-spots 20000
+
 
 Install
 -------
@@ -133,15 +133,13 @@ def _find_lab_tiff(sample_path: Path, lab_images_dir: Path) -> Path | None:
     return None
 
 
-def load_from_directory(sample_path: Path, max_spots: int = 50_000,
-                        lab_images_dir: Path = None):
+def load_from_directory(sample_path: Path, lab_images_dir: Path = None):
     """
     Load Visium/Visium HD data from a Space Ranger output directory.
 
     Parameters
     ----------
     sample_path    : Path  Root sample directory (contains square_002um/ or spatial/).
-    max_spots      : int   Cap on spots loaded (random subsample if exceeded).
     lab_images_dir : Path  Optional directory of full-res lab TIFFs. When a
                            matching TIFF is found the spot coordinates are used
                            as-is (pxl_col/row_in_fullres directly), because the
@@ -192,15 +190,6 @@ def load_from_directory(sample_path: Path, max_spots: int = 50_000,
         )
     pos_df = pos_df.loc[common]
     adata = adata[common]
-
-    # Subsample if needed
-    n = len(pos_df)
-    if n > max_spots:
-        print(f"[viewer] Subsampling {n:,} → {max_spots:,} spots for performance.")
-        rng = np.random.default_rng(42)
-        idx = rng.choice(n, max_spots, replace=False)
-        pos_df = pos_df.iloc[idx]
-        adata = adata[pos_df.index]
 
     # ── Image and coordinate loading ────────────────────────────────────────
     lab_tiff = _find_lab_tiff(sample_path, lab_images_dir)
@@ -275,8 +264,7 @@ def load_from_directory(sample_path: Path, max_spots: int = 50_000,
     return image, lowres_image, coords_df, gene_matrix, gene_names, scalefactors
 
 
-def load_from_h5ad(h5ad_path: Path, image_path: Path = None,
-                   max_spots: int = 50_000):
+def load_from_h5ad(h5ad_path: Path, image_path: Path = None):
     """
     Load spatial data from a pre-processed .h5ad file.
 
@@ -310,16 +298,6 @@ def load_from_h5ad(h5ad_path: Path, image_path: Path = None,
             "  • adata.obs columns 'x' and 'y'\n"
             "  • adata.obs columns 'pxl_col_in_fullres' and 'pxl_row_in_fullres'"
         )
-
-    # Subsample
-    n = len(adata)
-    if n > max_spots:
-        print(f"[viewer] Subsampling {n:,} → {max_spots:,} spots for performance.")
-        rng = np.random.default_rng(42)
-        idx = rng.choice(n, max_spots, replace=False)
-        adata = adata[idx]
-        x_raw = x_raw[idx]
-        y_raw = y_raw[idx]
 
     # Load image
     if image_path and image_path.is_file():
@@ -1022,10 +1000,6 @@ def _parse_args():
         "--port", type=int, default=8050,
         help="Port to serve the app on (default: 8050)",
     )
-    p.add_argument(
-        "--max-spots", type=int, default=50_000,
-        help="Max spots to display; subsampled randomly if exceeded (default: 50 000)",
-    )
     p.add_argument("--debug", action="store_true", help="Enable Dash debug mode")
     return p.parse_args()
 
@@ -1044,12 +1018,12 @@ def main():
     if data_path.suffix == ".h5ad":
         (IMAGE, LOWRES_IMAGE, COORDS_DF,
          GENE_MATRIX, GENE_NAMES, SCALEFACTORS) = load_from_h5ad(
-            data_path, image_path, max_spots=args.max_spots
+            data_path, image_path
         )
     elif data_path.is_dir():
         (IMAGE, LOWRES_IMAGE, COORDS_DF,
          GENE_MATRIX, GENE_NAMES, SCALEFACTORS) = load_from_directory(
-            data_path, max_spots=args.max_spots, lab_images_dir=lab_images_dir
+            data_path, lab_images_dir=lab_images_dir
         )
     else:
         print(f"[viewer] ERROR: --data must be a directory or .h5ad file, got: {data_path}",
