@@ -862,13 +862,21 @@ def update_main_figure(layers, he_clicks, action):
     action = action or {"type": None}
     show_he = (he_clicks or 0) % 2 == 0
 
-    # Full rebuild when: initial load, add, delete, H&E toggle, or no action info
     triggered = [t["prop_id"] for t in callback_context.triggered]
     he_triggered = "he-toggle.n_clicks" in triggered
-    if he_triggered or action["type"] in (None, "add", "delete"):
+
+    # Full rebuild only on initial load, delete, or H&E toggle — these change layout/image
+    if he_triggered or action["type"] in (None, "delete"):
         return build_main_figure(layers, show_he=show_he)
 
-    # Patch: only update the changed trace property
+    # Add: append the new trace without touching layout (preserves zoom/pan state)
+    if action["type"] == "add":
+        new_layer = layers[-1]
+        p = Patch()
+        p["data"].append(_make_gene_trace(new_layer))
+        return p
+
+    # Style change: update only the affected trace property
     if action["type"] == "style":
         idx   = action.get("trace_idx", 0)
         field = action.get("field")
