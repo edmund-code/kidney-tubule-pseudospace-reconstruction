@@ -68,10 +68,12 @@ import plotly.graph_objects as go
 # ──────────────────────────────────────────────────────────────────────────────
 # SECTION 2: Module-level globals (populated by main() before app.run)
 # ──────────────────────────────────────────────────────────────────────────────
-IMAGE: Image.Image = None          # full hires H&E image
+IMAGE: Image.Image = None          # image delivered to browser (may be downsampled)
 LOWRES_IMAGE: Image.Image = None   # low-res image for minimap
-IMG_WIDTH: int = 0
-IMG_HEIGHT: int = 0
+IMG_WIDTH: int = 0                 # pixel width of IMAGE (browser copy)
+IMG_HEIGHT: int = 0                # pixel height of IMAGE (browser copy)
+COORD_WIDTH: int = 0               # coordinate-space width  (full-res, used for Plotly axes)
+COORD_HEIGHT: int = 0              # coordinate-space height (full-res, used for Plotly axes)
 COORDS_DF: pd.DataFrame = None     # columns: x, y (Y-flipped, hires pixel space)
 GENE_MATRIX: sparse.csc_matrix = None  # (n_spots × n_genes) CSC for fast column slice
 GENE_NAMES: list = []
@@ -213,6 +215,12 @@ def load_from_directory(sample_path: Path, max_spots: int = 50_000,
 
         x_coords = pos_df["pxl_col_in_fullres"].values
         y_coords = pos_df["pxl_row_in_fullres"].values
+
+        # Store full-res coordinate-space dimensions BEFORE downsampling.
+        # These are used for Plotly axis ranges and image placement so that
+        # dots (which live in full-res pixel space) stay aligned with the image.
+        scalefactors["_coord_width"]  = img_width
+        scalefactors["_coord_height"] = img_height
 
         # Downsample TIFF to a browser-deliverable size while keeping data coords
         # in full-res space. The image is placed in data-space at its full-res
@@ -367,11 +375,11 @@ def build_main_figure(layers: list, show_he: bool = True) -> go.Figure:
         fig.add_layout_image(
             source=_img_to_b64(IMAGE),
             x=0,
-            y=IMG_HEIGHT,   # top-left of image in data coords (Y is flipped)
+            y=COORD_HEIGHT,  # top-left anchor in coordinate space (Y-flipped)
             xref="x",
             yref="y",
-            sizex=IMG_WIDTH,
-            sizey=IMG_HEIGHT,
+            sizex=COORD_WIDTH,   # stretch to fill full coordinate extent
+            sizey=COORD_HEIGHT,
             sizing="stretch",
             layer="below",
             opacity=1.0,
@@ -384,14 +392,14 @@ def build_main_figure(layers: list, show_he: bool = True) -> go.Figure:
 
     fig.update_layout(
         xaxis=dict(
-            range=[0, IMG_WIDTH],
+            range=[0, COORD_WIDTH],
             showgrid=False,
             zeroline=False,
             showticklabels=False,
             constrain="domain",
         ),
         yaxis=dict(
-            range=[0, IMG_HEIGHT],
+            range=[0, COORD_HEIGHT],
             showgrid=False,
             zeroline=False,
             showticklabels=False,
@@ -416,9 +424,9 @@ def build_minimap_figure(viewport: dict = None) -> go.Figure:
     viewport keys: x0, x1, y0, y1  (in hires pixel / data coords)
     """
     lw, lh = LOWRES_IMAGE.size
-    # Scale factor from hires coords to lowres image pixels
-    sx = lw / IMG_WIDTH
-    sy = lh / IMG_HEIGHT
+    # Scale factor from coordinate space (full-res) to minimap pixel space
+    sx = lw / COORD_WIDTH
+    sy = lh / COORD_HEIGHT
 
     shapes = []
     if viewport:
@@ -857,7 +865,7 @@ def update_status_bar(hover_data, relayout_data):
     if hover_data and hover_data.get("points"):
         pt = hover_data["points"][0]
         x_px = pt.get("x", 0)
-        y_px = IMG_HEIGHT - pt.get("y", 0)   # un-flip for display
+        y_px = COORD_HEIGHT - pt.get("y", 0)   # un-flip for display
         parts.append(f"X: {x_px:.0f}  Y: {y_px:.0f} px")
         if UM_PER_HIRES_PX:
             parts.append(
@@ -870,7 +878,7 @@ def update_status_bar(hover_data, relayout_data):
         x0 = relayout_data.get("xaxis.range[0]")
         x1 = relayout_data.get("xaxis.range[1]")
         if x0 is not None and x1 is not None and (x1 - x0) > 0:
-            zoom = IMG_WIDTH / (x1 - x0)
+            zoom = COORD_WIDTH / (x1 - x0)
             parts.append(f"Zoom: {zoom:.2f}×")
 
     if not parts:
@@ -1023,7 +1031,7 @@ def _parse_args():
 
 
 def main():
-    global IMAGE, LOWRES_IMAGE, IMG_WIDTH, IMG_HEIGHT
+    global IMAGE, LOWRES_IMAGE, IMG_WIDTH, IMG_HEIGHT, COORD_WIDTH, COORD_HEIGHT
     global COORDS_DF, GENE_MATRIX, GENE_NAMES, GENE_INDEX
     global SCALEFACTORS, UM_PER_HIRES_PX
 
@@ -1049,6 +1057,11 @@ def main():
         sys.exit(1)
 
     IMG_WIDTH, IMG_HEIGHT = IMAGE.size
+    # COORD dimensions = the coordinate space Plotly axes must match.
+    # When a lab TIFF was loaded, coords are full-res and the image was
+    # downsampled, so these differ from IMG_WIDTH/IMG_HEIGHT.
+    COORD_WIDTH  = SCALEFACTORS.get("_coord_width",  IMG_WIDTH)
+    COORD_HEIGHT = SCALEFACTORS.get("_coord_height", IMG_HEIGHT)
     GENE_INDEX = {g: i for i, g in enumerate(GENE_NAMES)}
 
     # Compute µm per data-coordinate pixel for the status bar scale display.
