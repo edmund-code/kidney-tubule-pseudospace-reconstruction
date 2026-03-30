@@ -1,0 +1,18 @@
+name: tubule_pseudospace_reconstruction
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - numpy
+  - pandas
+  - pyarrow
+  - matplotlib
+  - scipy
+  - tqdm
+  - anndata
+  - scanpy
+  - opencv
+  - pip
+  - pip:
+      - fastparquet

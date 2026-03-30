@@ -1,0 +1,29 @@
+# Large data files
+*.h5ad
+*.h5
+*.npy
+*.parquet
+*.pdf
+
+# Large GeoJSON segmentation files
+segmentations/
+
+# Raw Visium HD data
+visium_data/
+
+# Processed/intermediate data directories
+filtered_tubule_matrices/
+tubule_gene_matrix/
+harmony_integration/
+processed_data/
+
+# Old stuff
+old_stuff_not_using/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Jupyter checkpoints
+.ipynb_checkpoints/
