@@ -27,3 +27,6 @@ __pycache__/
 
 # Jupyter checkpoints
 .ipynb_checkpoints/
+
+# Generated static assets (spatial_viewer.py writes these at startup)
+assets/

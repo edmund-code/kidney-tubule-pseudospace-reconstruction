@@ -69,6 +69,7 @@ import plotly.graph_objects as go
 # SECTION 2: Module-level globals (populated by main() before app.run)
 # ──────────────────────────────────────────────────────────────────────────────
 IMAGE: Image.Image = None          # image delivered to browser (may be downsampled)
+IMAGE_URL: str = None              # URL for main figure — served as static file to avoid base64 size limits
 LOWRES_IMAGE: Image.Image = None   # low-res image for minimap
 IMG_WIDTH: int = 0                 # pixel width of IMAGE (browser copy)
 IMG_HEIGHT: int = 0                # pixel height of IMAGE (browser copy)
@@ -351,7 +352,7 @@ def build_main_figure(layers: list, show_he: bool = True) -> go.Figure:
 
     if show_he:
         fig.add_layout_image(
-            source=_img_to_b64(IMAGE),
+            source=IMAGE_URL,
             x=0,
             y=COORD_HEIGHT,  # top-left anchor in coordinate space (Y-flipped)
             xref="x",
@@ -1005,7 +1006,7 @@ def _parse_args():
 
 
 def main():
-    global IMAGE, LOWRES_IMAGE, IMG_WIDTH, IMG_HEIGHT, COORD_WIDTH, COORD_HEIGHT
+    global IMAGE, IMAGE_URL, LOWRES_IMAGE, IMG_WIDTH, IMG_HEIGHT, COORD_WIDTH, COORD_HEIGHT
     global COORDS_DF, GENE_MATRIX, GENE_NAMES, GENE_INDEX
     global SCALEFACTORS, UM_PER_HIRES_PX
 
@@ -1047,6 +1048,17 @@ def main():
         UM_PER_HIRES_PX = mpp / coord_scale
     else:
         UM_PER_HIRES_PX = None
+
+    # Save the main H&E image as a static JPEG served by Dash.
+    # Using a URL avoids embedding a large base64 blob in the figure JSON,
+    # which breaks for full-res TIFFs (>10 MB encoded).
+    assets_dir = Path(__file__).parent / "assets"
+    assets_dir.mkdir(exist_ok=True)
+    he_path = assets_dir / "he_image.jpg"
+    print(f"[viewer] Saving H&E image to {he_path} ...")
+    IMAGE.convert("RGB").save(he_path, format="JPEG", quality=90)
+    IMAGE_URL = "/assets/he_image.jpg"
+    print(f"[viewer] H&E image saved ({he_path.stat().st_size / 1e6:.1f} MB)")
 
     print(f"[viewer] {len(COORDS_DF):,} spots  |  {len(GENE_NAMES):,} genes")
     print(f"[viewer] Image: {IMG_WIDTH} × {IMG_HEIGHT} px")
