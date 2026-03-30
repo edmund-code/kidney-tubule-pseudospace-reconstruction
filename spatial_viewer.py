@@ -81,6 +81,8 @@ GENE_NAMES: list = []
 GENE_INDEX: dict = {}              # gene_name → column index in GENE_MATRIX
 SCALEFACTORS: dict = {}
 UM_PER_HIRES_PX: float = None     # micrometres per hires pixel (for scale bar)
+SPOT_DIAMETER: float = 4.5        # spot_diameter_fullres in coordinate units (for zoom scaling)
+_EXPR_CACHE: dict = {}            # gene → (x_vals, y_vals, norm_expr, raw_expr) — avoids repeat matrix slices
 
 # ──────────────────────────────────────────────────────────────────────────────
 # SECTION 3: Data Loading
@@ -191,6 +193,7 @@ def load_from_directory(sample_path: Path, lab_images_dir: Path = None):
         )
     pos_df = pos_df.loc[common]
     adata = adata[common]
+    adata.var_names_make_unique()   # Visium HD h5 files often have duplicate gene names
 
     # ── Image and coordinate loading ────────────────────────────────────────
     lab_tiff = _find_lab_tiff(sample_path, lab_images_dir)
@@ -457,30 +460,60 @@ _COLORSCALES = [
 _COLORSCALE_NAMES = ["Red", "Blue", "Green", "Yellow", "Purple", "Cyan", "Orange"]
 
 
-def _make_gene_trace(layer: dict) -> go.Scattergl:
+MAX_POINTS_PER_GENE = 300_000   # cap rendered points per gene; random sample within expressing spots
+
+
+def _get_gene_data(gene: str):
+    """
+    Return (x, y, norm_expr, raw_expr) for expressing spots, using a cache
+    to avoid re-slicing the sparse matrix on every redraw.
+    """
+    if gene in _EXPR_CACHE:
+        return _EXPR_CACHE[gene]
+
+    if gene not in GENE_INDEX:
+        result = (np.array([]), np.array([]), np.array([]), np.array([]))
+        _EXPR_CACHE[gene] = result
+        return result
+
+    col_idx = GENE_INDEX[gene]
+    expr = np.asarray(GENE_MATRIX[:, col_idx].todense()).flatten()
+    mask = expr > 0
+    if not mask.any():
+        result = (np.array([]), np.array([]), np.array([]), np.array([]))
+        _EXPR_CACHE[gene] = result
+        return result
+
+    x_nz = COORDS_DF["x"].values[mask]
+    y_nz = COORDS_DF["y"].values[mask]
+    expr_nz = expr[mask]
+
+    # Subsample within expressing spots if too many (keeps visual density correct)
+    if len(x_nz) > MAX_POINTS_PER_GENE:
+        rng = np.random.default_rng(42)
+        idx = rng.choice(len(x_nz), MAX_POINTS_PER_GENE, replace=False)
+        x_nz, y_nz, expr_nz = x_nz[idx], y_nz[idx], expr_nz[idx]
+
+    norm = (expr_nz - expr_nz.min()) / (expr_nz.max() - expr_nz.min() + 1e-9)
+    result = (x_nz, y_nz, norm, expr_nz)
+    _EXPR_CACHE[gene] = result
+    return result
+
+
+def _make_gene_trace(layer: dict, marker_size: float = None) -> go.Scattergl:
     """
     Build a WebGL scatter trace for one gene layer. Only spots with
     expression > 0 are plotted, coloured by normalised expression.
-    Using Scattergl (WebGL) allows tens of thousands of points at 60 fps.
+    marker_size overrides layer["radius"] (used by zoom-scaling callback).
     """
     gene = layer["gene"]
-    if gene not in GENE_INDEX:
-        return go.Scattergl(x=[], y=[], mode="markers", name=gene)
+    x, y, norm, raw = _get_gene_data(gene)
 
-    col_idx = GENE_INDEX[gene]
-    # Slice one column from CSC matrix — O(nnz) operation
-    expr = np.asarray(GENE_MATRIX[:, col_idx].todense()).flatten()
-
-    mask = expr > 0
-    if not mask.any():
-        return go.Scattergl(x=[], y=[], mode="markers", name=gene)
-
-    expr_nz = expr[mask]
-    norm = (expr_nz - expr_nz.min()) / (expr_nz.max() - expr_nz.min() + 1e-9)
+    size = marker_size if marker_size is not None else layer["radius"]
 
     return go.Scattergl(
-        x=COORDS_DF["x"].values[mask],
-        y=COORDS_DF["y"].values[mask],
+        x=x,
+        y=y,
         mode="markers",
         name=gene,
         marker=dict(
@@ -488,17 +521,19 @@ def _make_gene_trace(layer: dict) -> go.Scattergl:
             colorscale=layer["colorscale"],
             cmin=0,
             cmax=1,
-            size=layer["radius"],
+            size=size,
+            sizemode="diameter",   # explicit: size is in screen pixels, constant regardless of zoom
             opacity=layer["opacity"],
             showscale=False,
         ),
+        visible=layer.get("visible", True),
         hovertemplate=(
             f"<b>{gene}</b><br>"
-            "count: %{customdata:.1f}<br>"
-            "x: %{x:.0f} &nbsp; y: %{y:.0f}"
+            "count: %{{customdata:.1f}}<br>"
+            "x: %{{x:.0f}} &nbsp; y: %{{y:.0f}}"
             "<extra></extra>"
         ),
-        customdata=expr_nz,
+        customdata=raw,
     )
 
 
@@ -700,6 +735,7 @@ def serve_he_image():
 # This avoids the "duplicate Output" restriction in Dash.
 @app.callback(
     Output("gene-layers", "data"),
+    Output("action-store", "data"),
     # Triggers
     Input("add-gene-btn", "n_clicks"),
     Input({"type": "eye-toggle",    "index": ALL}, "n_clicks"),
@@ -723,18 +759,19 @@ def update_gene_layers(
     gene, layers,
 ):
     ctx = callback_context
+    no_action = {"type": None}
     if not ctx.triggered:
-        return layers or []
+        return layers or [], no_action
 
     layers = layers or []
-    triggered_prop = ctx.triggered[0]["prop_id"]   # e.g. "add-gene-btn.n_clicks"
+    triggered_prop = ctx.triggered[0]["prop_id"]
 
     # ── Add new layer ──────────────────────────────────────────────────────
     if triggered_prop == "add-gene-btn.n_clicks":
         if not gene or gene not in GENE_INDEX:
-            return layers
+            return layers, no_action
         if any(lay["gene"] == gene for lay in layers):
-            return layers   # already present
+            return layers, no_action
         cs_idx = len(layers) % len(_COLORSCALES)
         new_layer = {
             "id":         str(uuid.uuid4())[:8],
@@ -744,15 +781,15 @@ def update_gene_layers(
             "color_idx":  cs_idx,
             "radius":     5,
             "opacity":    0.85,
+            "trace_idx":  len(layers),   # position this trace will occupy in figure.data
         }
-        return layers + [new_layer]
+        return layers + [new_layer], {"type": "add"}
 
     # ── Parse which component fired ────────────────────────────────────────
-    # triggered_prop looks like '{"index":"abc1","type":"eye-toggle"}.n_clicks'
     comp_type = None
     layer_id  = None
     try:
-        prop_str, prop_name = triggered_prop.rsplit(".", 1)
+        prop_str, _ = triggered_prop.rsplit(".", 1)
         id_dict   = json.loads(prop_str)
         comp_type = id_dict.get("type")
         layer_id  = id_dict.get("index")
@@ -765,32 +802,55 @@ def update_gene_layers(
     color_map   = {c["index"]: int(v) for c, v in zip(color_ids, color_idxs) if v is not None}
 
     new_layers = []
+    action = no_action
     for lay in layers:
         lid = lay["id"]
 
-        # Delete: skip this layer entirely
+        # Delete: skip this layer; triggers full rebuild via action type
         if comp_type == "trash-btn" and lid == layer_id:
+            action = {"type": "delete"}
             continue
 
         updated = dict(lay)
 
-        # Toggle visibility
+        # Toggle visibility — patch-able
         if comp_type == "eye-toggle" and lid == layer_id:
             updated["visible"] = not lay["visible"]
+            action = {"type": "style", "lid": lid, "field": "visible",
+                      "value": updated["visible"], "trace_idx": lay.get("trace_idx", 0)}
 
-        # Apply slider/dropdown values (always sync current state)
-        if lid in radius_map:
+        # Sync slider/dropdown and build patch action for whichever changed
+        if lid in radius_map and radius_map[lid] != lay["radius"]:
             updated["radius"] = radius_map[lid]
-        if lid in opacity_map:
+            action = {"type": "style", "lid": lid, "field": "radius",
+                      "value": radius_map[lid], "trace_idx": lay.get("trace_idx", 0)}
+        elif lid in radius_map:
+            updated["radius"] = radius_map[lid]
+
+        if lid in opacity_map and opacity_map[lid] != lay["opacity"]:
             updated["opacity"] = opacity_map[lid]
+            action = {"type": "style", "lid": lid, "field": "opacity",
+                      "value": opacity_map[lid], "trace_idx": lay.get("trace_idx", 0)}
+        elif lid in opacity_map:
+            updated["opacity"] = opacity_map[lid]
+
         if lid in color_map:
             ci = color_map[lid]
             updated["color_idx"]  = ci
             updated["colorscale"] = _COLORSCALES[ci % len(_COLORSCALES)]
+            if ci != lay.get("color_idx"):
+                action = {"type": "style", "lid": lid, "field": "colorscale",
+                          "value": _COLORSCALES[ci % len(_COLORSCALES)],
+                          "trace_idx": lay.get("trace_idx", 0)}
 
         new_layers.append(updated)
 
-    return new_layers
+    # After delete, reassign trace_idx so indices stay contiguous
+    if action.get("type") == "delete":
+        for i, lay in enumerate(new_layers):
+            lay["trace_idx"] = i
+
+    return new_layers, action
 
 
 # ── Callback 2: Rebuild sidebar layer list ─────────────────────────────────
@@ -807,18 +867,86 @@ def rebuild_layer_list(layers):
     return [_make_layer_card(lay, i) for i, lay in enumerate(layers)]
 
 
-# ── Callback 3: Rebuild main figure ────────────────────────────────────────
+# ── Callback 3: Update main figure ─────────────────────────────────────────
+# For style-only changes (radius, opacity, color, visibility), use Patch() to
+# update only the affected trace — avoids re-serialising all coordinate data.
+# Full rebuild only for add, delete, and H&E toggle.
 @app.callback(
     Output("main-graph", "figure"),
     Input("gene-layers", "data"),
     Input("he-toggle", "n_clicks"),
+    State("action-store", "data"),
 )
-def update_main_figure(layers, he_clicks):
-    show_he = (he_clicks or 0) % 2 == 0   # even n_clicks = visible
-    return build_main_figure(layers or [], show_he=show_he)
+def update_main_figure(layers, he_clicks, action):
+    from dash import Patch
+
+    layers = layers or []
+    action = action or {"type": None}
+    show_he = (he_clicks or 0) % 2 == 0
+
+    # Full rebuild when: initial load, add, delete, H&E toggle, or no action info
+    triggered = [t["prop_id"] for t in callback_context.triggered]
+    he_triggered = "he-toggle.n_clicks" in triggered
+    if he_triggered or action["type"] in (None, "add", "delete"):
+        return build_main_figure(layers, show_he=show_he)
+
+    # Patch: only update the changed trace property
+    if action["type"] == "style":
+        idx   = action.get("trace_idx", 0)
+        field = action.get("field")
+        val   = action.get("value")
+        p = Patch()
+        if field == "radius":
+            p["data"][idx]["marker"]["size"] = val
+        elif field == "opacity":
+            p["data"][idx]["marker"]["opacity"] = val
+        elif field == "colorscale":
+            p["data"][idx]["marker"]["colorscale"] = val
+        elif field == "visible":
+            p["data"][idx]["visible"] = val
+        return p
+
+    return build_main_figure(layers, show_he=show_he)
 
 
-# ── Callback 4: Update minimap viewport rectangle ──────────────────────────
+# ── Callback 4: Zoom-proportional marker sizing ────────────────────────────
+# Plotly Scattergl marker size is in screen pixels — constant regardless of zoom.
+# This callback scales marker size with zoom so dots represent their physical
+# tissue footprint (2 µm Visium HD bins), growing as you zoom in.
+# Triggered by relayoutData (pan/zoom events); uses Patch to avoid resending data.
+@app.callback(
+    Output("main-graph", "figure", allow_duplicate=True),
+    Input("main-graph", "relayoutData"),
+    State("gene-layers", "data"),
+    prevent_initial_call=True,
+)
+def scale_markers_on_zoom(relayout_data, layers):
+    from dash import Patch
+
+    if not relayout_data or not layers:
+        return dash.no_update
+
+    x0 = relayout_data.get("xaxis.range[0]")
+    x1 = relayout_data.get("xaxis.range[1]")
+    if x0 is None or x1 is None:
+        return dash.no_update
+
+    x_range = x1 - x0
+    if x_range <= 0:
+        return dash.no_update
+
+    # Base size: at full zoom out (x_range = COORD_WIDTH), use the layer's radius.
+    # Scale linearly so the dot covers the same fraction of tissue at any zoom.
+    zoom_factor = COORD_WIDTH / x_range
+    p = Patch()
+    for layer in layers:
+        idx  = layer.get("trace_idx", 0)
+        size = max(1.0, layer["radius"] * zoom_factor)
+        p["data"][idx]["marker"]["size"] = size
+    return p
+
+
+# ── Callback 5: Update minimap viewport rectangle ──────────────────────────
 @app.callback(
     Output("minimap-graph", "figure"),
     Input("main-graph", "relayoutData"),
@@ -840,7 +968,7 @@ def update_minimap(relayout_data):
     return build_minimap_figure(viewport)
 
 
-# ── Callback 5: Status bar ─────────────────────────────────────────────────
+# ── Callback 6: Status bar ─────────────────────────────────────────────────
 @app.callback(
     Output("status-bar", "children"),
     Input("main-graph", "hoverData"),
@@ -896,6 +1024,11 @@ def _build_layout() -> html.Div:
         children=[
             # Client-side stores
             dcc.Store(id="gene-layers", data=[]),
+            # action-store carries metadata about the last mutation so the figure
+            # callback can Patch (fast) for style changes vs full-rebuild for add/delete.
+            # type: "add" | "delete" | "style" | None
+            # For "style": lid (layer id), field (radius/opacity/colorscale/visible), trace_idx
+            dcc.Store(id="action-store", data={"type": None}),
 
             # ── Main row: sidebar + canvas ───────────────────────────────
             html.Div(
@@ -1018,7 +1151,7 @@ def _parse_args():
 def main():
     global IMAGE, IMAGE_URL, LOWRES_IMAGE, IMG_WIDTH, IMG_HEIGHT, COORD_WIDTH, COORD_HEIGHT
     global COORDS_DF, GENE_MATRIX, GENE_NAMES, GENE_INDEX
-    global SCALEFACTORS, UM_PER_HIRES_PX
+    global SCALEFACTORS, UM_PER_HIRES_PX, SPOT_DIAMETER
 
     args = _parse_args()
     data_path      = Path(args.data)
@@ -1047,6 +1180,7 @@ def main():
     # downsampled, so these differ from IMG_WIDTH/IMG_HEIGHT.
     COORD_WIDTH  = SCALEFACTORS.get("_coord_width",  IMG_WIDTH)
     COORD_HEIGHT = SCALEFACTORS.get("_coord_height", IMG_HEIGHT)
+    SPOT_DIAMETER = SCALEFACTORS.get("spot_diameter_fullres", 4.5)
     GENE_INDEX = {g: i for i, g in enumerate(GENE_NAMES)}
 
     # Compute µm per data-coordinate pixel for the status bar scale display.
