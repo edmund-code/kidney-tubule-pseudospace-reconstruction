@@ -214,7 +214,7 @@ def load_from_directory(sample_path: Path, lab_images_dir: Path = None):
         # Downsample TIFF to a browser-deliverable size while keeping data coords
         # in full-res space. The image is placed in data-space at its full-res
         # dimensions, and Plotly stretches the (downsampled) PNG to fill it.
-        MAX_WEB_PX = 6000
+        MAX_WEB_PX = 32096  # full TIFF width — JPEG compression makes this viable
         if img_width > MAX_WEB_PX:
             scale = MAX_WEB_PX / img_width
             web_w = MAX_WEB_PX
@@ -330,10 +330,10 @@ def load_from_h5ad(h5ad_path: Path, image_path: Path = None):
 # ──────────────────────────────────────────────────────────────────────────────
 
 def _img_to_b64(img: Image.Image) -> str:
-    """Encode a PIL image as a base64 PNG data URI for Plotly."""
+    """Encode a PIL image as a base64 JPEG data URI for Plotly."""
     buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+    img.convert("RGB").save(buf, format="JPEG", quality=90)
+    return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode()
 
 
 def build_main_figure(layers: list, show_he: bool = True) -> go.Figure:
