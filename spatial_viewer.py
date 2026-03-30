@@ -35,6 +35,7 @@ Usage
 -----
     python spatial_viewer.py --data visium_data/Ctrl1A2
     python spatial_viewer.py --data visium_data/Ctrl1A2 --port 8888
+    python spatial_viewer.py --data visium_data/Ctrl1A2 --lab-images lab_tiff_images/
     python spatial_viewer.py --data myfile.h5ad --image path/to/image.png
     python spatial_viewer.py --data myfile.h5ad --max-spots 20000
 
@@ -109,14 +110,41 @@ def _find_spatial_assets(base_path: Path):
     )
 
 
-def load_from_directory(sample_path: Path, max_spots: int = 50_000):
+def _find_lab_tiff(sample_path: Path, lab_images_dir: Path) -> Path | None:
+    """
+    Fuzzy-match a sample directory name to a TIFF file in lab_images_dir.
+    Normalises both sides to lowercase with underscores removed, so e.g.
+    sample 'Ctrl1A2' matches 'Ctrl_1A2.tif'.
+
+    Returns the matched Path, or None if no match found.
+    """
+    if not lab_images_dir or not lab_images_dir.is_dir():
+        return None
+
+    def normalise(s: str) -> str:
+        return s.lower().replace("_", "").replace("-", "")
+
+    sample_norm = normalise(sample_path.name)
+    for tiff in lab_images_dir.glob("*.tif*"):
+        if normalise(tiff.stem) == sample_norm:
+            return tiff
+    return None
+
+
+def load_from_directory(sample_path: Path, max_spots: int = 50_000,
+                        lab_images_dir: Path = None):
     """
     Load Visium/Visium HD data from a Space Ranger output directory.
 
     Parameters
     ----------
-    sample_path : Path  Root sample directory (contains square_002um/ or spatial/).
-    max_spots   : int   Cap on spots loaded (random subsample if exceeded).
+    sample_path    : Path  Root sample directory (contains square_002um/ or spatial/).
+    max_spots      : int   Cap on spots loaded (random subsample if exceeded).
+    lab_images_dir : Path  Optional directory of full-res lab TIFFs. When a
+                           matching TIFF is found the spot coordinates are used
+                           as-is (pxl_col/row_in_fullres directly), because the
+                           lab TIFFs are already in 1:1 alignment with Visium HD
+                           2 µm bin coordinates.
 
     Returns
     -------
@@ -172,35 +200,65 @@ def load_from_directory(sample_path: Path, max_spots: int = 50_000):
         pos_df = pos_df.iloc[idx]
         adata = adata[pos_df.index]
 
-    # Scale full-res pixel coords → hires image pixel coords
-    x_hires = pos_df["pxl_col_in_fullres"].values * hires_scalef
-    y_hires = pos_df["pxl_row_in_fullres"].values * hires_scalef
+    # ── Image and coordinate loading ────────────────────────────────────────
+    lab_tiff = _find_lab_tiff(sample_path, lab_images_dir)
 
-    # Load images
-    hires_png = spatial_dir / "tissue_hires_image.png"
-    lowres_png = spatial_dir / "tissue_lowres_image.png"
+    if lab_tiff:
+        # Lab TIFFs are in 1:1 alignment with Visium HD 2 µm bin full-res coords.
+        # Use full-res pixel coords directly (no hires_scalef scaling).
+        print(f"[viewer] Using lab TIFF: {lab_tiff.name}")
+        Image.MAX_IMAGE_PIXELS = None   # disable decompression bomb check for large TIFFs
+        full_image = Image.open(lab_tiff).convert("RGB")
+        img_width, img_height = full_image.size
 
-    if hires_png.is_file():
-        image = Image.open(hires_png).convert("RGB")
+        x_coords = pos_df["pxl_col_in_fullres"].values
+        y_coords = pos_df["pxl_row_in_fullres"].values
+
+        # Downsample TIFF to a browser-deliverable size while keeping data coords
+        # in full-res space. The image is placed in data-space at its full-res
+        # dimensions, and Plotly stretches the (downsampled) PNG to fill it.
+        MAX_WEB_PX = 6000
+        if img_width > MAX_WEB_PX:
+            scale = MAX_WEB_PX / img_width
+            web_w = MAX_WEB_PX
+            web_h = int(img_height * scale)
+            print(f"[viewer] Resampling TIFF {img_width}×{img_height} → {web_w}×{web_h} for web delivery")
+            image = full_image.resize((web_w, web_h), Image.LANCZOS)
+        else:
+            image = full_image
+
+        # Scale bar: microns_per_pixel from scalefactors applies to full-res coords
+        scalefactors["_coord_scale"] = 1.0   # coords are already full-res
+
     else:
-        print("[viewer] Warning: tissue_hires_image.png not found; using blank canvas.")
-        w = int(x_hires.max()) + 50
-        h = int(y_hires.max()) + 50
-        image = Image.new("RGB", (w, h), (220, 210, 195))
+        # Fall back to bundled hires PNG
+        hires_png = spatial_dir / "tissue_hires_image.png"
+        if hires_png.is_file():
+            image = Image.open(hires_png).convert("RGB")
+        else:
+            print("[viewer] Warning: no image found; using blank canvas.")
+            w = int(pos_df["pxl_col_in_fullres"].max() * hires_scalef) + 50
+            h = int(pos_df["pxl_row_in_fullres"].max() * hires_scalef) + 50
+            image = Image.new("RGB", (w, h), (220, 210, 195))
 
-    if lowres_png.is_file():
+        img_width, img_height = image.size
+        x_coords = pos_df["pxl_col_in_fullres"].values * hires_scalef
+        y_coords = pos_df["pxl_row_in_fullres"].values * hires_scalef
+        scalefactors["_coord_scale"] = hires_scalef
+
+    # Minimap: always a small thumbnail of whatever image we settled on
+    lowres_png = spatial_dir / "tissue_lowres_image.png"
+    if not lab_tiff and lowres_png.is_file():
         lowres_image = Image.open(lowres_png).convert("RGB")
     else:
-        lowres_image = image.copy()
+        lowres_image = (full_image if lab_tiff else image).copy()
         lowres_image.thumbnail((400, 400), Image.LANCZOS)
-
-    img_width, img_height = image.size
 
     # Y-flip: Plotly's y-origin is bottom-left; image origin is top-left.
     # We flip y so dots rendered in data-space align with the image.
     coords_df = pd.DataFrame({
-        "x": x_hires,
-        "y": img_height - y_hires,
+        "x": x_coords,
+        "y": img_height - y_coords,
     })
 
     gene_matrix = sparse.csc_matrix(adata.X)
@@ -944,6 +1002,15 @@ def _parse_args():
         help="(h5ad mode only) Path to a histology image (PNG / JPEG / TIFF)",
     )
     p.add_argument(
+        "--lab-images", default=None,
+        help=(
+            "Directory containing full-res lab TIFF images (e.g. lab_tiff_images/). "
+            "TIFFs must be named to match the sample directory, e.g. Ctrl_1A2.tif "
+            "for sample Ctrl1A2. These are expected to be in 1:1 pixel alignment "
+            "with the Visium HD 2 µm bin full-res coordinates."
+        ),
+    )
+    p.add_argument(
         "--port", type=int, default=8050,
         help="Port to serve the app on (default: 8050)",
     )
@@ -961,8 +1028,9 @@ def main():
     global SCALEFACTORS, UM_PER_HIRES_PX
 
     args = _parse_args()
-    data_path  = Path(args.data)
-    image_path = Path(args.image) if args.image else None
+    data_path      = Path(args.data)
+    image_path     = Path(args.image) if args.image else None
+    lab_images_dir = Path(args.lab_images) if args.lab_images else None
 
     print(f"[viewer] Loading data from: {data_path}")
     if data_path.suffix == ".h5ad":
@@ -973,7 +1041,7 @@ def main():
     elif data_path.is_dir():
         (IMAGE, LOWRES_IMAGE, COORDS_DF,
          GENE_MATRIX, GENE_NAMES, SCALEFACTORS) = load_from_directory(
-            data_path, max_spots=args.max_spots
+            data_path, max_spots=args.max_spots, lab_images_dir=lab_images_dir
         )
     else:
         print(f"[viewer] ERROR: --data must be a directory or .h5ad file, got: {data_path}",
@@ -983,11 +1051,13 @@ def main():
     IMG_WIDTH, IMG_HEIGHT = IMAGE.size
     GENE_INDEX = {g: i for i, g in enumerate(GENE_NAMES)}
 
-    # Compute µm per hires pixel (used in status bar scale display)
-    mpp        = SCALEFACTORS.get("microns_per_pixel")
-    hires_sf   = SCALEFACTORS.get("tissue_hires_scalef", 1.0)
-    if mpp and hires_sf:
-        UM_PER_HIRES_PX = mpp / hires_sf
+    # Compute µm per data-coordinate pixel for the status bar scale display.
+    # _coord_scale == 1.0 means coords are full-res (lab TIFF path);
+    # otherwise coords were scaled by tissue_hires_scalef.
+    mpp          = SCALEFACTORS.get("microns_per_pixel")
+    coord_scale  = SCALEFACTORS.get("_coord_scale", SCALEFACTORS.get("tissue_hires_scalef", 1.0))
+    if mpp and coord_scale:
+        UM_PER_HIRES_PX = mpp / coord_scale
     else:
         UM_PER_HIRES_PX = None
 
