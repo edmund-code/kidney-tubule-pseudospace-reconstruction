@@ -81,7 +81,6 @@ GENE_NAMES: list = []
 GENE_INDEX: dict = {}              # gene_name → column index in GENE_MATRIX
 SCALEFACTORS: dict = {}
 UM_PER_HIRES_PX: float = None     # micrometres per hires pixel (for scale bar)
-SPOT_DIAMETER: float = 4.5        # spot_diameter_fullres in coordinate units (for zoom scaling)
 _EXPR_CACHE: dict = {}            # gene → (x_vals, y_vals, norm_expr, raw_expr) — avoids repeat matrix slices
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -448,14 +447,16 @@ def build_minimap_figure(viewport: dict = None) -> go.Figure:
 
 # Colorscales to cycle through as gene layers are added.
 # Each is a 2-stop scale from fully transparent to fully opaque colour.
+# Colorscales: light grey → full saturated colour, all fully opaque (alpha=1).
+# Low-expression spots show as pale grey; high-expression as the full colour.
 _COLORSCALES = [
-    [[0, "rgba(255, 60,  60,  0)"], [1, "rgba(255, 60,  60,  1)"]],   # red
-    [[0, "rgba(60,  150, 255, 0)"], [1, "rgba(60,  150, 255, 1)"]],   # blue
-    [[0, "rgba(60,  220, 110, 0)"], [1, "rgba(60,  220, 110, 1)"]],   # green
-    [[0, "rgba(255, 200, 50,  0)"], [1, "rgba(255, 200, 50,  1)"]],   # yellow
-    [[0, "rgba(210, 80,  210, 0)"], [1, "rgba(210, 80,  210, 1)"]],   # purple
-    [[0, "rgba(50,  220, 220, 0)"], [1, "rgba(50,  220, 220, 1)"]],   # cyan
-    [[0, "rgba(255, 140, 0,   0)"], [1, "rgba(255, 140, 0,   1)"]],   # orange
+    [[0, "rgb(200,200,200)"], [1, "rgb(255, 60,  60 )"]],   # red
+    [[0, "rgb(200,200,200)"], [1, "rgb(60,  150, 255)"]],   # blue
+    [[0, "rgb(200,200,200)"], [1, "rgb(60,  220, 110)"]],   # green
+    [[0, "rgb(200,200,200)"], [1, "rgb(255, 200, 50 )"]],   # yellow
+    [[0, "rgb(200,200,200)"], [1, "rgb(210, 80,  210)"]],   # purple
+    [[0, "rgb(200,200,200)"], [1, "rgb(50,  220, 220)"]],   # cyan
+    [[0, "rgb(200,200,200)"], [1, "rgb(255, 140, 0  )"]],   # orange
 ]
 _COLORSCALE_NAMES = ["Red", "Blue", "Green", "Yellow", "Purple", "Cyan", "Orange"]
 
@@ -893,44 +894,7 @@ def update_main_figure(layers, he_clicks, action):
     return build_main_figure(layers, show_he=show_he)
 
 
-# ── Callback 4: Zoom-proportional marker sizing ────────────────────────────
-# Plotly Scattergl marker size is in screen pixels — constant regardless of zoom.
-# This callback scales marker size with zoom so dots represent their physical
-# tissue footprint (2 µm Visium HD bins), growing as you zoom in.
-# Triggered by relayoutData (pan/zoom events); uses Patch to avoid resending data.
-@app.callback(
-    Output("main-graph", "figure", allow_duplicate=True),
-    Input("main-graph", "relayoutData"),
-    State("gene-layers", "data"),
-    prevent_initial_call=True,
-)
-def scale_markers_on_zoom(relayout_data, layers):
-    from dash import Patch
-
-    if not relayout_data or not layers:
-        return dash.no_update
-
-    x0 = relayout_data.get("xaxis.range[0]")
-    x1 = relayout_data.get("xaxis.range[1]")
-    if x0 is None or x1 is None:
-        return dash.no_update
-
-    x_range = x1 - x0
-    if x_range <= 0:
-        return dash.no_update
-
-    # Base size: at full zoom out (x_range = COORD_WIDTH), use the layer's radius.
-    # Scale linearly so the dot covers the same fraction of tissue at any zoom.
-    zoom_factor = COORD_WIDTH / x_range
-    p = Patch()
-    for layer in layers:
-        idx  = layer.get("trace_idx", 0)
-        size = max(1.0, layer["radius"] * zoom_factor)
-        p["data"][idx]["marker"]["size"] = size
-    return p
-
-
-# ── Callback 5: Update minimap viewport rectangle ──────────────────────────
+# ── Callback 4: Update minimap viewport rectangle ──────────────────────────
 @app.callback(
     Output("minimap-graph", "figure"),
     Input("main-graph", "relayoutData"),
@@ -1135,7 +1099,7 @@ def _parse_args():
 def main():
     global IMAGE, IMAGE_URL, LOWRES_IMAGE, IMG_WIDTH, IMG_HEIGHT, COORD_WIDTH, COORD_HEIGHT
     global COORDS_DF, GENE_MATRIX, GENE_NAMES, GENE_INDEX
-    global SCALEFACTORS, UM_PER_HIRES_PX, SPOT_DIAMETER
+    global SCALEFACTORS, UM_PER_HIRES_PX
 
     args = _parse_args()
     data_path      = Path(args.data)
@@ -1164,7 +1128,6 @@ def main():
     # downsampled, so these differ from IMG_WIDTH/IMG_HEIGHT.
     COORD_WIDTH  = SCALEFACTORS.get("_coord_width",  IMG_WIDTH)
     COORD_HEIGHT = SCALEFACTORS.get("_coord_height", IMG_HEIGHT)
-    SPOT_DIAMETER = SCALEFACTORS.get("spot_diameter_fullres", 4.5)
     GENE_INDEX = {g: i for i, g in enumerate(GENE_NAMES)}
 
     # Compute µm per data-coordinate pixel for the status bar scale display.
