@@ -215,7 +215,7 @@ def load_from_directory(sample_path: Path, lab_images_dir: Path = None):
         # Downsample TIFF to a browser-deliverable size while keeping data coords
         # in full-res space. The image is placed in data-space at its full-res
         # dimensions, and Plotly stretches the (downsampled) PNG to fill it.
-        MAX_WEB_PX = 32096  # full TIFF width — JPEG compression makes this viable
+        MAX_WEB_PX = 10000  # browser canvas limit is ~268M pixels; 10000×5625 = 56M ✓
         if img_width > MAX_WEB_PX:
             scale = MAX_WEB_PX / img_width
             web_w = MAX_WEB_PX
